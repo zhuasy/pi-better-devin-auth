@@ -105,19 +105,28 @@ export function installDevinFooter(
         const isDevin = ctx.model?.provider === providerId;
         const quota = isDevin ? getQuota() : undefined;
 
-        // Line 1: cwd + git branch + session name
-        const branch = footerData.getGitBranch();
-        const sessionName = ctx.sessionManager.getSessionName();
-        const headerParts = [statusTheme.fg('muted', formatCwd(ctx.cwd))];
-        if (branch) headerParts.push(statusTheme.fg('syntaxKeyword', `(${branch})`));
-        if (sessionName) {
-          headerParts.push(statusTheme.fg('dim', '•'));
-          headerParts.push(statusTheme.fg('accent', sessionName));
-        }
-        const pwdLine = truncateToWidth(headerParts.join(' '), width, statusTheme.fg('dim', '...'));
+        const ellipsis = statusTheme.fg('dim', '...');
+        const minPadding = 2;
+        const alignRow = (leftText: string, rightText: string): string => {
+          if (!rightText) return truncateToWidth(leftText, width, ellipsis);
+          const lW = visibleWidth(leftText);
+          const rW = visibleWidth(rightText);
+          if (lW + minPadding + rW <= width) {
+            return leftText + ' '.repeat(width - lW - rW) + rightText;
+          }
+          const availRight = width - lW - minPadding;
+          if (availRight > 0) {
+            const truncRight = truncateToWidth(rightText, availRight, '');
+            const pad = ' '.repeat(Math.max(0, width - lW - visibleWidth(truncRight)));
+            return leftText + pad + truncRight;
+          }
+          return truncateToWidth(leftText, width, ellipsis);
+        };
 
-        // Line 2: all token stats + Devin quota + model/thinking on ONE line
-        const stats = collectSessionStats(ctx, isDevin);
+        const extStatuses = footerData.getExtensionStatuses();
+        const optchatCompact = sanitizeStatus(extStatuses.get('optchat-compact') ?? '');
+
+        // Model/thinking segment
         const thinkingLevel = ctx.model?.reasoning ? pi.getThinkingLevel() : undefined;
         const showProvider = footerData.getAvailableProviderCount() > 1 && Boolean(ctx.model);
         const rightMeta: FooterRightMeta = {
@@ -126,49 +135,51 @@ export function installDevinFooter(
           thinkingLevel,
           showProvider,
         };
+        let modelRight = formatModelRight(rightMeta, statusTheme);
 
-        const minPadding = 2;
+        // Line 1: cwd + git branch + session name | (when optchat-compact present) model/thinking on right
+        const branch = footerData.getGitBranch();
+        const sessionName = ctx.sessionManager.getSessionName();
+        const headerParts = [statusTheme.fg('muted', formatCwd(ctx.cwd))];
+        if (branch) headerParts.push(statusTheme.fg('syntaxKeyword', `(${branch})`));
+        if (sessionName) {
+          headerParts.push(statusTheme.fg('dim', '•'));
+          headerParts.push(statusTheme.fg('accent', sessionName));
+        }
+        const pwdLeft = headerParts.join(' ');
+        if (optchatCompact && showProvider && visibleWidth(pwdLeft) + minPadding + visibleWidth(modelRight) > width) {
+          modelRight = formatModelRight({ ...rightMeta, showProvider: false }, statusTheme);
+        }
+        const pwdLine = optchatCompact
+          ? alignRow(pwdLeft, modelRight)
+          : truncateToWidth(pwdLeft, width, ellipsis);
+
+        // Line 2: token stats + Devin quota | optchat-compact (or model/thinking when no optchat-compact)
+        const stats = collectSessionStats(ctx, isDevin);
         let left = formatStatsLeft(stats, quota, statusTheme, Date.now(), false);
-        let right = formatModelRight(rightMeta, statusTheme);
+        let right = optchatCompact || modelRight;
 
         // If full quota + right side don't fit on one line, switch to compact quota
         if (quota && visibleWidth(left) + minPadding + visibleWidth(right) > width) {
           left = formatStatsLeft(stats, quota, statusTheme, Date.now(), true);
         }
-        // If still tight, drop the provider prefix on the right
-        if (showProvider && visibleWidth(left) + minPadding + visibleWidth(right) > width) {
+        // If still tight and model is on row 2, drop the provider prefix
+        if (!optchatCompact && showProvider && visibleWidth(left) + minPadding + visibleWidth(right) > width) {
           right = formatModelRight({ ...rightMeta, showProvider: false }, statusTheme);
         }
 
-        const leftWidth = visibleWidth(left);
-        const rightWidth = visibleWidth(right);
-        let statsLine: string;
-
-        if (leftWidth + minPadding + rightWidth <= width) {
-          const pad = ' '.repeat(width - leftWidth - rightWidth);
-          statsLine = left + pad + right;
-        } else {
-          const availRight = width - leftWidth - minPadding;
-          if (availRight > 0) {
-            const truncRight = truncateToWidth(right, availRight, '');
-            const pad = ' '.repeat(Math.max(0, width - leftWidth - visibleWidth(truncRight)));
-            statsLine = left + pad + truncRight;
-          } else {
-            statsLine = truncateToWidth(left, width, statusTheme.fg('dim', '...'));
-          }
-        }
-
+        const statsLine = alignRow(left, right);
         const lines = [pwdLine, statsLine];
 
-        // Preserve any other extensions' setStatus() entries
-        const extStatuses = footerData.getExtensionStatuses();
+        // Preserve other extensions' setStatus() entries (suppress pi-optchat's verbose 'optchat' when compact is active)
         if (extStatuses.size > 0) {
           const joined = Array.from(extStatuses.entries())
+            .filter(([k]) => k !== 'optchat-compact' && !(optchatCompact && (k === 'optchat' || k === 'optchat.role')))
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([, text]) => sanitizeStatus(text))
             .filter(Boolean)
             .join(' ');
-          if (joined) lines.push(truncateToWidth(joined, width, statusTheme.fg('dim', '...')));
+          if (joined) lines.push(truncateToWidth(joined, width, ellipsis));
         }
 
         return lines;
